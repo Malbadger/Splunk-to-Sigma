@@ -1,0 +1,18 @@
+title: {title}
+id: {id}
+status: stable
+description: {description}
+references:
+  - {references}
+author: {author}
+date: {date}
+logsource:
+  product: {product}
+  service: {service}
+detection:
+  selection:{fields}
+  filter:{filter_fields}
+  condition: {condition}
+falsepositives:
+  - Unknown
+level: {level}
