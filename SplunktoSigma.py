@@ -39,20 +39,12 @@ level: {level}
 """
 
 def load_template(template_file="sigma_template.txt"):
-    """
-    Loads a Sigma template from a file or defaults to the hardcoded template.
-    """
     if os.path.exists(template_file):
         with open(template_file, "r") as file:
             return file.read()
     return DEFAULT_SIGMA_TEMPLATE
 
 def parse_eval_assigned_fields(query: str):
-    """
-    Extracts all fields that are assigned within eval statements.
-    e.g. '| eval name = last . "," . first, user=if(user,user,"none")'
-    returns {'name', 'user'}
-    """
     assigned_fields = set()
     eval_statements = re.findall(r'\|\s*eval\s+([^\|]+)', query, re.IGNORECASE)
     for statement in eval_statements:
@@ -62,49 +54,30 @@ def parse_eval_assigned_fields(query: str):
     return assigned_fields
 
 def parse_logsource(query):
-    """
-    Extracts `index` and `sourcetype` for the logsource section.
-    """
     product = ", ".join(parse_field(query, "index"))
     service = ", ".join(parse_field(query, "sourcetype"))
     return product, service
 
 def parse_field(query, field):
-    """
-    Looks for <field>= or <field> IN(...) 
-    specifically for logsource fields (index, sourcetype).
-    """
     values = set()
-
-    # <field>=<value>
     eq_pattern = rf'{field}\s*=\s*["\']?([\w:]+)["\']?'
     eq_match = re.search(eq_pattern, query, re.IGNORECASE)
     if eq_match:
         values.add(eq_match.group(1).strip())
-
-    # <field> IN(...)
     in_pattern = rf'{field}\s+IN\s*\(\s*([^)]+)\s*\)'
     in_match = re.search(in_pattern, query, re.IGNORECASE)
     if in_match:
         for item in in_match.group(1).split(","):
             values.add(item.strip())
-
     return sorted(values)
 
 def parse_selection_and_filter(query, eval_assigned_fields=None):
-    """
-    Extracts fields for selection and filter sections.
-      - Values from <field>=<value> or <field> IN(...) => selection
-      - Values from NOT <field> IN(...) => filter
-      - Fields in eval_assigned_fields are skipped from selection
-    """
     if eval_assigned_fields is None:
         eval_assigned_fields = set()
 
     selection = {}
     filter_conditions = {}
 
-    # 1) "[NOT ] <field> IN(...)"
     in_pattern = r'(\bNOT\s+)?(\w+)\s+IN\s*\(\s*([^)]+)\s*\)'
     all_in_matches = re.findall(in_pattern, query, re.IGNORECASE)
     for not_part, field, values_str in all_in_matches:
@@ -112,22 +85,17 @@ def parse_selection_and_filter(query, eval_assigned_fields=None):
         if not_part and not_part.strip().upper() == "NOT":
             filter_conditions.setdefault(field, set()).update(values_list)
         else:
-            # Skip if field is assigned via eval
             if field not in eval_assigned_fields:
                 selection.setdefault(field, set()).update(values_list)
 
-    # 2) <field>=<value>
     eq_pattern = r'(\w+)\s*=\s*["\']?([\w:]+)["\']?'
     eq_matches = re.findall(eq_pattern, query)
     for field, value in eq_matches:
-        # Skip known logsource fields
         if field.lower() in ["index", "sourcetype"]:
             continue
-        # Skip if assigned in eval
         if field not in eval_assigned_fields:
             selection.setdefault(field, set()).add(value.strip())
 
-    # Convert sets to sorted lists
     for k in selection:
         selection[k] = sorted(selection[k])
     for k in filter_conditions:
@@ -136,28 +104,17 @@ def parse_selection_and_filter(query, eval_assigned_fields=None):
     return selection, filter_conditions
 
 def parse_eval(query):
-    """
-    Extracts eval expressions from the query.
-    """
     return re.findall(r'\|\s*eval\s+([^\|]+)', query, re.IGNORECASE)
 
 def parse_stats_and_table(query):
-    """
-    Extracts stats and table statements from the query.
-    Returns (stats_statements, table_statements).
-    """
     stats_matches = re.findall(r'\|\s*stats\s+([^\|]+)', query, re.IGNORECASE)
     table_matches = re.findall(r'\|\s*table\s+([^\|]+)', query, re.IGNORECASE)
     return stats_matches, table_matches
 
 def convert_to_sigma(splunk_query, template_file="sigma_template.txt"):
-    """
-    Converts a Splunk detection query into a Sigma rule format with correct YAML indentation.
-    """
     try:
         sigma_template = load_template(template_file)
 
-        # == Metadata fields ==
         title = "Converted Splunk Detection"
         rule_id = str(uuid4())
         description = "Automatically converted Splunk detection rule."
@@ -166,49 +123,26 @@ def convert_to_sigma(splunk_query, template_file="sigma_template.txt"):
         date_created = date.today().isoformat()
         level = "medium"
 
-        # == 1) Evals assigned fields ==
         eval_assigned_fields = parse_eval_assigned_fields(splunk_query)
-
-        # == 2) Parse logsource ==
         product, service = parse_logsource(splunk_query)
-
-        # == 3) Build selection/filter ==
         selection, filter_conditions = parse_selection_and_filter(
             splunk_query,
             eval_assigned_fields
         )
-
-        # == 4) Extract eval statements ==
         eval_statements = parse_eval(splunk_query)
 
-        # == 5) Extract stats statements (ignore table in final YAML) ==
+        # We won't include stats in final output, but we parse them anyway
         stats_statements, table_statements = parse_stats_and_table(splunk_query)
 
-        # ---------------------------------------------------
-        # Build the YAML for selection fields
-        # ---------------------------------------------------
-        # We want each field to start 4 spaces in, list items 6 spaces in.
-        #
-        # Example:
-        # detection:
-        #   selection:
-        #     EventCode:
-        #       - '4688'
-        #     ComputerName:
-        #       - 'laptop'
-        #
+        # Build YAML for selection
         fields_lines = []
         for field, values in selection.items():
             fields_lines.append(f"    {field}:")
             for value in values:
                 fields_lines.append(f"      - '{value}'")
-
-        # Join them with newlines
         fields_yaml = "\n".join(fields_lines)
 
-        # ---------------------------------------------------
-        # Build the YAML for filter fields
-        # ---------------------------------------------------
+        # Build YAML for filter
         if filter_conditions:
             filter_lines = []
             for field, values in filter_conditions.items():
@@ -218,14 +152,10 @@ def convert_to_sigma(splunk_query, template_file="sigma_template.txt"):
             filter_yaml = "\n".join(filter_lines)
             condition = "selection and not filter"
         else:
-            # Indent consistently under 'filter:'
             filter_yaml = "    - 'none'"
             condition = "selection"
 
-        # ---------------------------------------------------
-        # Build the YAML for eval statements
-        # ---------------------------------------------------
-        # Similar indentation: 4 spaces for the key, 6 spaces for the list item.
+        # Build YAML for eval
         eval_yaml_lines = []
         if eval_statements:
             eval_yaml_lines.append("    eval:")
@@ -233,41 +163,19 @@ def convert_to_sigma(splunk_query, template_file="sigma_template.txt"):
                 eval_yaml_lines.append(f"      - {expr}")
         eval_yaml = "\n".join(eval_yaml_lines)
 
-        # ---------------------------------------------------
-        # Build the YAML for stats statements
-        # ---------------------------------------------------
-        stats_yaml_lines = []
-        if stats_statements:
-            stats_yaml_lines.append("    stats:")
-            for stat in stats_statements:
-                stats_yaml_lines.append(f"      - {stat}")
-        stats_yaml = "\n".join(stats_yaml_lines)
-
-        # ---------------------------------------------------
-        # Combine selection, eval, stats into final selection block
-        # ---------------------------------------------------
-        # We'll place them in the order: fields -> eval -> stats.
+        # Combine selection + eval (no stats)
         blocks = []
         if fields_yaml.strip():
             blocks.append(fields_yaml)
         if eval_yaml.strip():
             blocks.append(eval_yaml)
-        if stats_yaml.strip():
-            blocks.append(stats_yaml)
 
-        # Now we combine them with a newline separating each block
         final_fields_yaml = "\n".join(blocks)
-
-        # IMPORTANT: Prepend a newline so that the first line 
-        # appears on the next line after "selection:" in the template.
         if final_fields_yaml:
             final_fields_yaml = "\n" + final_fields_yaml
-
-        # Similarly, prepend a newline for filter, so it appears under "filter:"
         if filter_yaml.strip():
             filter_yaml = "\n" + filter_yaml
 
-        # Insert into the template
         sigma_rule = sigma_template.format(
             title=title,
             id=rule_id,
@@ -290,9 +198,6 @@ def convert_to_sigma(splunk_query, template_file="sigma_template.txt"):
         raise ValueError(f"Error in conversion: {e}")
 
 def convert_action():
-    """
-    Triggered by the "Convert" button.
-    """
     try:
         input_text = input_box.get("1.0", tk.END).strip()
         if input_text:
@@ -308,9 +213,6 @@ def convert_action():
         output_box.insert(tk.END, "An error occurred during conversion. Please check the logs.")
 
 def save_action():
-    """
-    Saves the converted Sigma rule to a file.
-    """
     try:
         output_text = output_box.get("1.0", tk.END).strip()
         if output_text:
@@ -329,9 +231,6 @@ def save_action():
         output_box.insert(tk.END, "An error occurred while saving the file. Please check the logs.")
 
 def load_action():
-    """
-    Loads a Splunk detection query from a file into the input box.
-    """
     try:
         file_path = filedialog.askopenfilename(
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
@@ -346,45 +245,79 @@ def load_action():
         output_box.delete("1.0", tk.END)
         output_box.insert(tk.END, "An error occurred while loading the file. Please check the logs.")
 
-# GUI Setup
+# ----------------------------
+# Modern GUI Setup
+# ----------------------------
 root = tk.Tk()
 root.title("Splunk to Sigma Converter")
-root.configure(bg="#2c2c2c")
-root.geometry("800x600")
+root.geometry("900x600")   # Increase width for a more spacious layout
 root.minsize(600, 400)
 
+# Use a modern theme
 style = ttk.Style()
-style.theme_use("default")
+# 'clam', 'default', 'alt', 'classic', 'vista', 'xpnative' are built-in
+style.theme_use("clam")
+
+# Set a dark background for root
+root.configure(bg="#1f1f1f")
+
+# Configure TFrame with a dark background
+style.configure("TFrame", background="#1f1f1f")
+
+# Configure the TButton for a modern dark style
 style.configure(
     "TButton",
-    background="#228B22",
+    background="#344955",
     foreground="#ffffff",
+    borderwidth=0,
+    font=("Helvetica", 10, "bold"),
+    focuscolor="none"
+)
+style.map(
+    "TButton",
+    background=[("active", "#4a6572")],
+    relief=[("pressed", "groove"), ("!pressed", "ridge")]
+)
+
+# If you had labels, you'd style them like this:
+style.configure(
+    "TLabel",
+    background="#1f1f1f",
+    foreground="#ffffff",
+    font=("Arial", 12)
+)
+
+# Frame to hold the text boxes
+main_frame = ttk.Frame(root)
+main_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
+
+# Create a modern ScrolledText for input
+input_box = scrolledtext.ScrolledText(
+    main_frame,
+    wrap=tk.WORD,
+    bg="#2b2b2b",
+    fg="#ffffff",
     font=("Arial", 12),
-    padding=5,
+    insertbackground="white",
     borderwidth=0
 )
-style.map("TButton", background=[("active", "#006400")])
+input_box.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
 
-input_box = scrolledtext.ScrolledText(
-    root, wrap=tk.WORD,
-    bg="#3b3b3b",
-    fg="#ffffff",
-    font=("Arial", 12),
-    insertbackground="white"
-)
-input_box.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
-
+# Create a modern ScrolledText for output
 output_box = scrolledtext.ScrolledText(
-    root, wrap=tk.WORD,
-    bg="#3b3b3b",
+    main_frame,
+    wrap=tk.WORD,
+    bg="#2b2b2b",
     fg="#ffffff",
     font=("Arial", 12),
-    insertbackground="white"
+    insertbackground="white",
+    borderwidth=0
 )
-output_box.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
+output_box.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
 
-button_frame = tk.Frame(root, bg="#2c2c2c")
-button_frame.grid(row=1, column=0, columnspan=2, pady=10, sticky="ew")
+# Button frame
+button_frame = ttk.Frame(root)
+button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
 
 convert_button = ttk.Button(button_frame, text="Convert", command=convert_action)
 convert_button.pack(side="left", padx=5)
@@ -402,8 +335,14 @@ save_button.pack(side="left", padx=5)
 load_button = ttk.Button(button_frame, text="Load", command=load_action)
 load_button.pack(side="left", padx=5)
 
+# Make the text boxes resize with the window
 root.grid_columnconfigure(0, weight=1)
 root.grid_columnconfigure(1, weight=1)
 root.grid_rowconfigure(0, weight=1)
+
+# Also make the main_frame expand
+main_frame.grid_rowconfigure(0, weight=1)
+main_frame.grid_columnconfigure(0, weight=1)
+main_frame.grid_columnconfigure(1, weight=1)
 
 root.mainloop()
